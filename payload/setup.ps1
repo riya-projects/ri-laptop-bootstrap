@@ -1086,6 +1086,16 @@ function Step-Syncthing {
     "$r (account $($svc.StartName)); runs at boot with no one signed in"
 }
 
+function Step-SyncthingFirewall {
+    # Ri's devices are shared into the hub's tailnet one way: the hub dials the laptop on 22000,
+    # the laptop cannot reach the hub. So syncthing.exe may be reached on TCP 22000 from the
+    # tailnet only; any broader allow rule for syncthing.exe or 22000 (the installer's own,
+    # for example) is switched off, not deleted. Runs even if the Syncthing step failed.
+    Set-TailnetInboundRule -Name $script:SyncthingFirewallRule -DisplayName 'Ri laptop: Syncthing (notes) from Tailscale only' -Port $script:SyncthingPort -Program $script:SyncthingExe
+    $n = Disable-BroadInboundRule -Port $script:SyncthingPort -ProgramLike '*\Syncthing\syncthing.exe'
+    "syncthing.exe on TCP $($script:SyncthingPort) allowed from $($script:TailnetV4) and $($script:TailnetV6) only; disabled $n broad rule(s) (not deleted)"
+}
+
 function Step-ObsidianVault {
     <# Brain opens in Obsidian with no clicks: merge it into the target user's own
        %APPDATA%\obsidian\obsidian.json (her profile, not the elevated admin's). #>
@@ -1489,7 +1499,7 @@ function Step-OffSwitch {
     if (-not (Test-Path $lnk)) { throw 'shortcut not created' }
     # The shortcut starts an elevated script, so users may run it but not change where it points.
     Invoke-Native icacls.exe @($lnk, '/inheritance:r', '/grant:r', "*$($script:SidAdministrators):F", '/grant:r', "*$($script:SidSystem):F", '/grant:r', '*S-1-5-32-545:RX') | Out-Null
-    "public desktop shortcut -> $target (stops and disables Tailscale, sshd, TightVNC, RustDesk and removes the VNC port proxy; Syncthing keeps running)"
+    "public desktop shortcut -> $target (stops and disables Tailscale, sshd, TightVNC, RustDesk, removes the VNC port proxy and disables the Syncthing inbound rule; the Syncthing service keeps running but notes stop syncing)"
 }
 
 function Step-BootProbe {
@@ -1549,6 +1559,7 @@ function Invoke-Setup {
     Invoke-Step 'Power on AC' { Step-Power } | Out-Null
     Invoke-Step 'Update active hours' { Step-ActiveHours } | Out-Null
     $sync = Invoke-Step 'Syncthing service' { Step-Syncthing }
+    Invoke-Step 'Syncthing firewall (Tailscale only)' { Step-SyncthingFirewall } | Out-Null
     if ($sync.Status -eq 'PASS') { Invoke-Step 'Brain folder (Syncthing)' { Step-Brain } | Out-Null }
     else { Invoke-Step 'Brain folder (Syncthing)' { throw 'Syncthing service step did not pass' } | Out-Null }
     $obs = Invoke-Step 'Obsidian' { Step-Obsidian }

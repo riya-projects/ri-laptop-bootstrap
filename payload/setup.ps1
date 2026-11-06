@@ -620,6 +620,42 @@ function Test-BrainProfile {
     return "$ProfilePath\Brain"
 }
 
+function Merge-ObsidianVaultConfig {
+    <# Obsidian keeps its vault list in %APPDATA%\obsidian\obsidian.json:
+       {"vaults":{"<16 hex id>":{"path":"C:\\Users\\x\\Brain","ts":<ms>,"open":true}}, ...}.
+       This format is internal and undocumented. Adds Brain (or marks an existing Brain entry
+       open:true); every other key and vault is kept. Malformed or unexpected JSON throws, so the
+       caller never overwrites it. Returns the new JSON and whether anything changed. #>
+    param([AllowEmptyString()][string]$Json, [string]$VaultPath, [string]$NewId, [long]$Ts)
+    if ([string]::IsNullOrWhiteSpace($Json)) { $cfg = [pscustomobject]@{} }
+    else {
+        # ConvertFrom-Json unwraps [{...}] to an object, so the root must be checked as text.
+        if (-not $Json.TrimStart([char]0xFEFF, ' ', "`t", "`r", "`n").StartsWith('{')) { throw 'obsidian.json is not a JSON object; left unchanged' }
+        # ConvertTo-Json flattens anything deeper than -Depth into a string; refuse instead.
+        if ((Get-JsonDepth $Json) -gt 20) { throw 'obsidian.json is nested deeper than 20 levels; left unchanged' }
+        try { $cfg = $Json | ConvertFrom-Json -ErrorAction Stop } catch { throw "obsidian.json is not valid JSON; left unchanged ($($_.Exception.Message))" }
+        if ($cfg.PSObject.BaseObject -isnot [System.Management.Automation.PSCustomObject]) { throw 'obsidian.json is not a JSON object; left unchanged' }
+    }
+    $names = @($cfg.PSObject.Properties | ForEach-Object { $_.Name })
+    if (-not ($names -contains 'vaults')) { $cfg | Add-Member -NotePropertyName vaults -NotePropertyValue ([pscustomobject]@{}) }
+    elseif ($null -eq $cfg.vaults -or $cfg.vaults.PSObject.BaseObject -isnot [System.Management.Automation.PSCustomObject]) { throw 'obsidian.json "vaults" is not an object; left unchanged' }
+    $key = ConvertTo-WindowsPathKey $VaultPath
+    $hits = @($cfg.vaults.PSObject.Properties | Where-Object { $_.Value -is [pscustomobject] -and (ConvertTo-WindowsPathKey "$($_.Value.path)") -eq $key })
+    if ($hits.Count -gt 1) { throw "obsidian.json already lists $VaultPath $($hits.Count) times; left unchanged" }
+    if ($hits.Count -eq 1) {
+        $v = $hits[0].Value
+        if (@($v.PSObject.Properties | ForEach-Object { $_.Name }) -contains 'open') {
+            if ($v.open -eq $true) { return [pscustomobject]@{ Json = $Json; Changed = $false; Id = $hits[0].Name } }
+            $v.open = $true
+        } else { $v | Add-Member -NotePropertyName open -NotePropertyValue $true }
+        return [pscustomobject]@{ Json = ($cfg | ConvertTo-Json -Depth 64); Changed = $true; Id = $hits[0].Name }
+    }
+    if ($NewId -notmatch '^[0-9a-f]{16}$') { throw 'vault id must be 16 hex characters' }
+    if (@($cfg.vaults.PSObject.Properties | ForEach-Object { $_.Name }) -contains $NewId) { throw "vault id $NewId already in use" }
+    $cfg.vaults | Add-Member -NotePropertyName $NewId -NotePropertyValue ([pscustomobject][ordered]@{ path = $VaultPath; ts = $Ts; open = $true })
+    return [pscustomobject]@{ Json = ($cfg | ConvertTo-Json -Depth 64); Changed = $true; Id = $NewId }
+}
+
 function Get-BrainConfigPlan {
     <# Syncthing cli calls (argument lists after `cli --home <dir>`) that make the hub a device
        and share folder `brain` at $Path with it. Only adds; never removes or edits anything.
@@ -638,6 +674,54 @@ function Get-BrainConfigPlan {
         $plan += , @('config', 'folders', $script:BrainFolderId, 'devices', 'add', '--device-id', $script:HubDeviceId)
     }
     return , $plan
+}
+
+function Get-JsonDepth {
+    <# Deepest {}/[] nesting in JSON text, ignoring brackets inside strings. #>
+    param([string]$Json)
+    $depth = 0; $max = 0; $inStr = $false; $esc = $false
+    foreach ($c in $Json.ToCharArray()) {
+        if ($inStr) { if ($esc) { $esc = $false } elseif ($c -eq '\') { $esc = $true } elseif ($c -eq '"') { $inStr = $false }; continue }
+        if ($c -eq '"') { $inStr = $true } elseif ($c -eq '{' -or $c -eq '[') { $depth++; if ($depth -gt $max) { $max = $depth } } elseif ($c -eq '}' -or $c -eq ']') { $depth-- }
+    }
+    return $max
+}
+
+function Get-HandleFinalPath {
+    <# The real path of an open file (after every link and junction on the way) and its hard
+       link count, read from the handle itself, so nothing can swap a folder after the check. #>
+    param([IO.FileStream]$Stream)
+    # Linux test runs only (PS 5.1 has no $IsLinux; StrictMode needs the variable: check).
+    if ((Test-Path variable:IsLinux) -and $IsLinux) { return [pscustomobject]@{ Path = "$((Get-Item -LiteralPath "/proc/self/fd/$($Stream.SafeFileHandle.DangerousGetHandle().ToInt32())" -Force).Target)"; Links = 1 } }
+    if (-not ('RiLaptop.FileHandle' -as [type])) {
+        Add-Type -Namespace RiLaptop -Name FileHandle -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle h, System.Text.StringBuilder path, uint size, uint flags);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h, [Out] uint[] info);
+'@
+    }
+    $sb = [Text.StringBuilder]::new(1024)
+    $n = [RiLaptop.FileHandle]::GetFinalPathNameByHandleW($Stream.SafeFileHandle, $sb, 1024, 0)
+    if ($n -eq 0 -or $n -ge 1024) { throw 'could not read the real path of the open file' }
+    $info = [uint32[]]::new(13)
+    if (-not [RiLaptop.FileHandle]::GetFileInformationByHandle($Stream.SafeFileHandle, $info)) { throw 'could not read the hard link count of the open file' }
+    return [pscustomobject]@{ Path = ($sb.ToString() -replace '^\\\\\?\\', ''); Links = [int]$info[10] }
+}
+
+function Open-VerifiedFile {
+    <# Opens $Path exclusively and checks, on the handle, that it really is $Path (no link or
+       junction anywhere above or at it) with one hard link. Every read and write then goes through
+       this handle. CreateNew can still leave an empty new file behind a swapped folder; it is never
+       written. #>
+    param([string]$Path, [IO.FileMode]$Mode)
+    $fs = [IO.File]::Open($Path, $Mode, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $real = Get-HandleFinalPath $fs
+        if ((ConvertTo-WindowsPathKey $real.Path) -ne (ConvertTo-WindowsPathKey $Path)) { throw "$Path opens $($real.Path) (a link or junction on the way); not writing" }
+        if ($real.Links -ne 1) { throw "$Path has $($real.Links) hard links; not writing" }
+    } catch { $fs.Dispose(); throw }
+    return $fs
 }
 
 function ConvertTo-WindowsPathKey {
@@ -890,7 +974,7 @@ function Step-AdminKey {
     $note = ''
     $bodies = @($current | ForEach-Object { Get-KeyBody $_ })
     if ($bodies -notcontains (Get-KeyBody $key)) {
-        [IO.File]::WriteAllText($script:AdminKeysFile, (($current + $key) -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllText($script:AdminKeysFile, (($current + $key) -join "`r`n") + "`r`n", ([Text.UTF8Encoding]::new($false)))
     }
     $others = @($current | Where-Object { (Get-KeyBody $_) -ne (Get-KeyBody $key) }).Count
     if ($others) { $note = "; NOTE: $others other key(s) also in the file" }
@@ -921,11 +1005,11 @@ function Step-SshdConfig {
     $changed = (($orig -join "`n") -ne ($new -join "`n"))
     if ($changed) {
         $candidate = "$($script:SshdConfig).ri-candidate"
-        [IO.File]::WriteAllLines($candidate, $new, (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllLines($candidate, $new, ([Text.UTF8Encoding]::new($false)))
         try { Invoke-Native $script:SshdExe @('-t', '-f', $candidate) | Out-Null }
         catch { Remove-Item $candidate -Force; throw "new sshd_config failed sshd -t; left the old one in place ($($_.Exception.Message))" }
         # Write into the existing file so its ACL stays as OpenSSH set it.
-        [IO.File]::WriteAllLines($script:SshdConfig, $new, (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllLines($script:SshdConfig, $new, ([Text.UTF8Encoding]::new($false)))
         Remove-Item $candidate -Force
         Restart-Service sshd
     }
@@ -1000,6 +1084,58 @@ function Step-Syncthing {
     }
     $r = Set-ServiceAutoRunning -Name $svc.Name
     "$r (account $($svc.StartName)); runs at boot with no one signed in"
+}
+
+function Step-ObsidianVault {
+    <# Brain opens in Obsidian with no clicks: merge it into the target user's own
+       %APPDATA%\obsidian\obsidian.json (her profile, not the elevated admin's). #>
+    if ($SkipObsidian) { return 'SKIP: -SkipObsidian' }
+    $account = Resolve-BrainUser
+    $userName = @($account -split '\\')[-1]
+    $sid = (New-Object Security.Principal.NTAccount $account).Translate([Security.Principal.SecurityIdentifier]).Value
+    $prof = Get-CimInstance Win32_UserProfile -Filter "SID='$sid'"
+    $profilePath = if ($prof) { "$($prof.LocalPath)" } else { '' }
+    $brain = Test-BrainProfile -Sid $sid -ProfilePath $profilePath -UserName $userName
+    if (-not (Test-Path -LiteralPath $brain -PathType Container)) { throw "$brain does not exist; the Brain folder step must pass first" }
+    if (@(Get-Process -Name Obsidian -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { @("$($_.UserName)" -split '\\')[-1] -ieq $userName }).Count) { throw "Obsidian is running for $account and would overwrite obsidian.json; close Obsidian and run setup again" }
+    $roaming = Join-Path $profilePath 'AppData\Roaming'
+    $dir = Join-Path $roaming 'obsidian'
+    $file = Join-Path $dir 'obsidian.json'
+    # Ri's own folders: never follow a link she (or anything) planted there while elevated.
+    # This is the early check; Open-VerifiedFile re-checks on the open handle, which no later swap can fool.
+    foreach ($x in $profilePath, (Join-Path $profilePath 'AppData'), $roaming, $dir, $file) {
+        if ((Test-Path -LiteralPath $x) -and ((Get-Item -LiteralPath $x -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$x is a link or junction; not writing through it" }
+    }
+    if (-not (Test-Path -LiteralPath $roaming -PathType Container)) { throw "$roaming not found (redirected AppData is not supported)" }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $fresh = -not (Test-Path -LiteralPath $file)
+    $fs = Open-VerifiedFile -Path $file -Mode $(if ($fresh) { 'CreateNew' } else { 'Open' })
+    try {
+        $oldBytes = [byte[]]::new($fs.Length)
+        $got = 0; while ($got -lt $oldBytes.Length) { $r = $fs.Read($oldBytes, $got, $oldBytes.Length - $got); if ($r -le 0) { break }; $got += $r }
+        $old = $utf8.GetString($oldBytes, 0, $got).TrimStart([char]0xFEFF)
+        $id = -join ((1..8) | ForEach-Object { '{0:x2}' -f (Get-Random -Minimum 0 -Maximum 256) })
+        $m = Merge-ObsidianVaultConfig -Json $old -VaultPath $brain -NewId $id -Ts ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+        if ($m.Changed) {
+            if ($got -gt 0) {
+                # Backup first. [IO.File]::Delete removes a planted file or (even dangling) link
+                # itself, never its target; CreateNew then refuses anything that reappears.
+                $bak = "$file.ri-laptop-bak"
+                [IO.File]::Delete($bak)
+                $bs = Open-VerifiedFile -Path $bak -Mode CreateNew
+                try { $bs.Write($oldBytes, 0, $got); $bs.Flush($true) } finally { $bs.Dispose() }
+            }
+            $bytes = $utf8.GetBytes($m.Json)
+            $fs.Position = 0; $fs.SetLength(0); $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true)
+        }
+        $fs.Position = 0
+        $back = [IO.StreamReader]::new($fs, $utf8, $true, 4096, $true).ReadToEnd()
+    } finally { $fs.Dispose() }
+    $check = Merge-ObsidianVaultConfig -Json $back -VaultPath $brain -NewId $id -Ts 0
+    if ($check.Changed) { throw "obsidian.json did not read back with $brain open:true" }
+    $how = if ($m.Changed) { 'added/marked open (old file kept as obsidian.json.ri-laptop-bak if there was one)' } else { 'already there' }
+    "Brain vault $brain open:true in $file ($how; other vaults and settings kept). Obsidian's vault list format is internal, not documented"
 }
 
 function Step-Obsidian {
@@ -1130,7 +1266,7 @@ function Step-Brain {
     if ($lost.Count) { throw "Syncthing config lost: $($lost -join ', ')" }
     if ($after.Devices -notcontains $script:HubDeviceId -or $after.FolderDevices -notcontains $script:HubDeviceId -or
         (ConvertTo-WindowsPathKey $after.Path) -ne (ConvertTo-WindowsPathKey $path)) { throw 'Syncthing config did not read back: brain folder shared with astrolab-nova' }
-    "folder '$($script:BrainFolderId)' at $path shared with $($script:HubDeviceName) ($($plan.Count) change(s); existing devices and folders kept). Next: Nova runs brain-accept on the hub; Ri opens $path in Obsidian (Open folder as vault)"
+    "folder '$($script:BrainFolderId)' at $path shared with $($script:HubDeviceName) ($($plan.Count) change(s); existing devices and folders kept). Next: Nova runs brain-accept on the hub; the Obsidian vault step adds it to her vault list"
 }
 
 function Assert-NoInstallerLogging {
@@ -1332,7 +1468,7 @@ function Step-VncCheck {
     if ("$((Get-NetFirewallRule -Name $script:VncFirewallRule).Enabled)" -ne 'True') { Close-VncAccess | Out-Null; throw 'VNC allow rule did not enable' }
     # Recorded only now, so the startup guard trusts an address only after a passing check.
     $json = @{ TailscaleIPv4 = $ip; SetUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') } | ConvertTo-Json -Compress
-    [IO.File]::WriteAllText($script:VncStateFile, $json, (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllText($script:VncStateFile, $json, ([Text.UTF8Encoding]::new($false)))
     "proxy only ${ip}:5900 -> 127.0.0.1:5901; tvnserver on loopback 5901 only; nothing on 5800; password required on 127.0.0.1:5901 and ${ip}:5900 (no None, also inside Tight); allow rule on; address recorded for the startup guard"
 }
 
@@ -1415,7 +1551,11 @@ function Invoke-Setup {
     $sync = Invoke-Step 'Syncthing service' { Step-Syncthing }
     if ($sync.Status -eq 'PASS') { Invoke-Step 'Brain folder (Syncthing)' { Step-Brain } | Out-Null }
     else { Invoke-Step 'Brain folder (Syncthing)' { throw 'Syncthing service step did not pass' } | Out-Null }
-    Invoke-Step 'Obsidian' { Step-Obsidian } | Out-Null
+    $obs = Invoke-Step 'Obsidian' { Step-Obsidian }
+    if ($obs.Status -eq 'SKIP') { Invoke-Step 'Obsidian Brain vault (open:true)' { 'SKIP: -SkipObsidian' } | Out-Null }
+    elseif ($obs.Status -ne 'PASS') { Invoke-Step 'Obsidian Brain vault (open:true)' { throw 'Obsidian step did not pass' } | Out-Null }
+    elseif (@($script:Results | Where-Object { $_.Step -eq 'Brain folder (Syncthing)' -and $_.Status -eq 'PASS' }).Count) { Invoke-Step 'Obsidian Brain vault (open:true)' { Step-ObsidianVault } | Out-Null }
+    else { Invoke-Step 'Obsidian Brain vault (open:true)' { throw 'Brain folder step did not pass' } | Out-Null }
     # Screen: firewall first, so tvnserver is never reachable beyond the tailnet.
     $vfw = Invoke-Step 'VNC firewall' { Step-VncFirewall }
     if ($vfw.Status -eq 'PASS') {

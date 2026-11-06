@@ -16,6 +16,9 @@ $script:VncPublicPort = 5900
 $script:VncInternalPort = 5901
 $script:VncHttpPort = 5800
 $script:VncFirewallRule = 'RiLaptop-VNC-Tailnet'
+# Syncthing (TCP 22000) from the tailnet only: the hub dials the laptop, never the other way.
+$script:SyncthingFirewallRule = 'RiLaptop-Syncthing-Tailnet'
+$script:SyncthingPort = 22000
 $script:VncBlockRule = 'RiLaptop-VNC-Block-Direct'
 $script:VncDataDir = Join-Path $env:ProgramData 'RiLaptop'
 $script:VncStateFile = Join-Path $script:VncDataDir 'vnc.json'

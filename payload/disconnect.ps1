@@ -5,7 +5,9 @@
   only listener on the Tailscale address for the screen) and disables its firewall rule.
   Quitting the Tailscale app is not enough while Run unattended is on.
 
-  Syncthing (note sync) keeps running: it gives no remote access to the laptop.
+  It also disables the Syncthing inbound rule (TCP 22000 from Tailscale). The Syncthing
+  service keeps running (it gives no remote access to the laptop), but the hub reaches it only
+  over Tailscale on that port, so notes stop syncing until setup.ps1 runs again.
   Withdrawing yes #4 (notes) is a separate step: Services > Syncthing > Stop and Disabled.
 
   To reconnect, run setup.ps1 again as administrator; it sets Tailscale and sshd back to
@@ -43,6 +45,15 @@ function Disable-RemoteAccess {
     # Proxy entries (all tables), the allow rule and any 5900 socket left, each read back.
     $c = Close-VncAccess
     if ($c.Complete) { $report += 'VNC port proxy and rule: closed' } else { $report += "VNC port proxy and rule: ERROR $($c.Notes -join '; ')" }
+    # Syncthing's inbound rule: the service stays (notes are yes #4, not remote access).
+    $label = "Syncthing inbound rule (TCP $($script:SyncthingPort))"
+    try {
+        if (Get-NetFirewallRule -Name $script:SyncthingFirewallRule -ErrorAction SilentlyContinue) {
+            Disable-NetFirewallRule -Name $script:SyncthingFirewallRule -ErrorAction Stop
+            if ("$((Get-NetFirewallRule -Name $script:SyncthingFirewallRule -ErrorAction Stop).Enabled)" -ne 'False') { throw 'still enabled' }
+            $report += "${label}: disabled"
+        } else { $report += "${label}: not present" }
+    } catch { $report += "${label}: ERROR $($_.Exception.Message)" }
     return $report
 }
 
@@ -51,7 +62,7 @@ function Test-RemoteAccessOff {
     param([string[]]$Report)
     foreach ($line in $Report) {
         if ($line -notmatch ': not installed$' -and $line -notmatch ': Stopped, start type Disabled$' -and
-            $line -ne 'VNC port proxy and rule: closed') { return $false }
+            $line -ne 'VNC port proxy and rule: closed' -and $line -notmatch '^Syncthing inbound rule \(TCP \d+\): (disabled|not present)$') { return $false }
     }
     return $true
 }
@@ -67,7 +78,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (Test-RemoteAccessOff -Report $lines) { Write-Host 'Remote access is off.' -ForegroundColor Green }
     else { Write-Host 'Remote access is NOT fully off. Restart the laptop, or tell Elara.' -ForegroundColor Red }
     $lines | ForEach-Object { Write-Host "  $_" }
-    Write-Host 'Syncthing (notes) is still running. To turn remote access back on, run setup.ps1 as administrator.'
+    Write-Host 'Syncthing (notes) is still running, but notes stop syncing: the hub can no longer reach it. To turn remote access and note sync back on, run setup.ps1 as administrator.'
     if (-not $NoPause) { Read-Host 'Press Enter to close' | Out-Null }
     if (-not (Test-RemoteAccessOff -Report $lines)) { exit 1 }
 }

@@ -6,14 +6,14 @@
 # download stops everything: nothing is run. The files are written into a folder that only
 # SYSTEM and Administrators can change, hashed again on disk, and only then is setup.ps1 run.
 
-$script:PayloadCommit = '8a1cb7cf51a075b7acfb2ba34d2352ef94b10826'
+$script:PayloadCommit = '0c70d6d09b1ca8b9ff4153bdf3cf5d4b2c7fad30'
 $script:PayloadBase = "https://raw.githubusercontent.com/riya-projects/ri-laptop-bootstrap/$($script:PayloadCommit)/payload"
 # File name -> SHA-256 (lowercase hex). The list is the whole payload: nothing else is fetched.
 $script:Manifest = [ordered]@{
     'admin_key.pub' = '6beba9d625e1daaa65fefe1120a35d37e1dc7bc8dd56d06d4b13ade4a64f3d93'
     'boot-probe.ps1' = '91d562e21e0c7198c7db886d1733c73e3a84e678b0d8d83e5f415e42f3cce23e'
     'disconnect.ps1' = 'eba08a0de49aa57afe5d5c0ffd414b5c0874b43d34a7ea928d502dec249845ea'
-    'setup.ps1' = '3de41de0b918c0613289e6bbcc0764b3ce8c0cfbf3a8e509d96d06dd5647ffb1'
+    'setup.ps1' = 'f36147ade01015e44eb481dbac29753288fa44c3b1131aaaae9ac1f779ad87ea'
     'verify-reboot.ps1' = 'aa8aa25c5d2f31820fd3d557752de98806c191a068e43b0b27a66da330fe73de'
     'vnc-common.ps1' = 'b51ed99ed14b3e51b2e41b373bde82d0953910c44ca672f29dc5763b0eb39031'
     'vnc-guard.ps1' = '82a9e007eaf396d3560e4a1e0b0c0abccab394023bc9b96cacba6434c2533713'

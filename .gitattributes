@@ -1,0 +1,3 @@
+# Hash-verified files must retain the exact committed bytes on every platform.
+payload/** -text
+install.ps1 -text

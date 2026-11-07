@@ -12,6 +12,14 @@ BeforeAll {
 }
 
 Describe 'manifest' {
+    It 'downloads the power guard alongside setup before invoking setup' {
+        $files = Get-VerifiedPayload -Base $script:PayloadBase -Manifest $script:Manifest -Fetch $localFetch
+        $files.Contains('power-guard.ps1') | Should -BeTrue
+        $guard = [Text.Encoding]::UTF8.GetString($files['power-guard.ps1'])
+        $guard | Should -Match 'function Install-PowerGuard'
+        [Text.Encoding]::UTF8.GetString($files['setup.ps1']) | Should -Match 'Install-PowerGuard -SourceScript'
+    }
+
     It 'pins one full commit on raw.githubusercontent.com' {
         $script:PayloadCommit | Should -Match '^[0-9a-f]{40}$'
         $script:PayloadBase | Should -Be "https://raw.githubusercontent.com/riya-projects/ri-laptop-bootstrap/$($script:PayloadCommit)/payload"

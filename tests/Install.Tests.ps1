@@ -12,6 +12,14 @@ BeforeAll {
 }
 
 Describe 'manifest' {
+    It 'downloads the power guard alongside setup before invoking setup' {
+        $files = Get-VerifiedPayload -Base $script:PayloadBase -Manifest $script:Manifest -Fetch $localFetch
+        $files.Contains('power-guard.ps1') | Should -BeTrue
+        $guard = [Text.Encoding]::UTF8.GetString($files['power-guard.ps1'])
+        $guard | Should -Match 'function Install-PowerGuard'
+        [Text.Encoding]::UTF8.GetString($files['setup.ps1']) | Should -Match 'Install-PowerGuard -SourceScript'
+    }
+
     It 'pins one full commit on raw.githubusercontent.com' {
         $script:PayloadCommit | Should -Match '^[0-9a-f]{40}$'
         $script:PayloadBase | Should -Be "https://raw.githubusercontent.com/riya-projects/ri-laptop-bootstrap/$($script:PayloadCommit)/payload"
@@ -82,9 +90,14 @@ Describe 'Invoke-Bootstrap' {
         Should -Invoke Write-Host -ParameterFilter { "$Object" -match 'FAIL  setup.ps1 exit code 1: NOT DONE' }
     }
     It 'runs the real setup process: its output reaches the window and only its exit code is returned' {
-        $fake = Join-Path $TestDrive 'powershell.exe'
-        Set-Content $fake "#!/bin/sh`necho 'PASS  step one'`necho 'NOT DONE: 1 step(s) FAILED'`nexit 3"
-        chmod +x $fake
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $fake = Join-Path $TestDrive 'setup-fixture.cmd'
+            Set-Content $fake "@echo off`r`necho PASS  step one`r`necho NOT DONE: 1 step(s) FAILED`r`nexit /b 3"
+        } else {
+            $fake = Join-Path $TestDrive 'powershell.exe'
+            Set-Content $fake "#!/bin/sh`necho 'PASS  step one'`necho 'NOT DONE: 1 step(s) FAILED'`nexit 3"
+            chmod +x $fake
+        }
         $script:PowerShellExe = $fake
         $shown = New-Object System.Collections.Generic.List[string]
         Mock Out-Host { $shown.Add("$InputObject") }

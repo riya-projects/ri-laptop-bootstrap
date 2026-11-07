@@ -86,6 +86,8 @@ $script:SyncthingHome = Join-Path $env:ProgramData 'Syncthing'
 $script:SyncthingExe = Join-Path $env:ProgramFiles 'Syncthing\syncthing.exe'
 
 . (Join-Path $PSScriptRoot 'vnc-common.ps1')
+# AC power guard (REQ #70). Loaded only if present, so Step-Power can FAIL with a clear reason.
+if (Test-Path (Join-Path $PSScriptRoot 'power-guard.ps1')) { . (Join-Path $PSScriptRoot 'power-guard.ps1') }
 
 # Pinned downloads: official GitHub releases, SHA-256 from GitHub's asset digest (checked 6 Nov 2026).
 $script:Pinned = @{
@@ -1034,19 +1036,13 @@ function Step-SshFirewall {
 }
 
 function Step-Power {
-    Invoke-Native powercfg.exe @('/change', 'standby-timeout-ac', '0') | Out-Null
-    Invoke-Native powercfg.exe @('/change', 'hibernate-timeout-ac', '0') | Out-Null
-    Invoke-Native powercfg.exe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_BUTTONS', 'LIDACTION', '0') | Out-Null
-    # The "system unattended sleep timeout" applies when Windows woke itself; 0 = never.
-    Invoke-Native powercfg.exe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_SLEEP', 'UNATTENDSLEEP', '0') | Out-Null
-    Invoke-Native powercfg.exe @('/setactive', 'SCHEME_CURRENT') | Out-Null
-    $sleep = Get-PowercfgIndex -Text (Invoke-Native powercfg.exe @('/query', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE'))
-    $hib = Get-PowercfgIndex -Text (Invoke-Native powercfg.exe @('/query', 'SCHEME_CURRENT', 'SUB_SLEEP', 'HIBERNATEIDLE'))
-    $lid = Get-PowercfgIndex -Text (Invoke-Native powercfg.exe @('/query', 'SCHEME_CURRENT', 'SUB_BUTTONS', 'LIDACTION'))
-    $unattended = Get-PowercfgIndex -Text (Invoke-Native powercfg.exe @('/query', 'SCHEME_CURRENT', 'SUB_SLEEP', 'UNATTENDSLEEP'))
-    if ($unattended.AC -ne 0) { throw "AC unattended sleep timeout is $($unattended.AC)" }
-    if ($sleep.AC -ne 0 -or $hib.AC -ne 0 -or $lid.AC -ne 0) { throw "AC values: sleep=$($sleep.AC) hibernate=$($hib.AC) lid=$($lid.AC)" }
-    'on AC: sleep never, hibernate timeout 0, lid close does nothing (battery settings unchanged)'
+    <# REQ #70: AC values on every power scheme (DC never written), network adapter checkbox off on
+       AC only with the original restored on battery, and the RiLaptop-PowerGuard task (boot,
+       hourly, power source change) that keeps it so. All of it lives in power-guard.ps1. #>
+    if (-not (Get-Command Install-PowerGuard -ErrorAction SilentlyContinue)) { throw 'power-guard.ps1 is missing next to setup.ps1' }
+    # A ri-laptop folder made by someone else is moved aside first (same folder as vnc.txt).
+    Protect-SecretDir
+    Install-PowerGuard -SourceScript (Join-Path $PSScriptRoot 'power-guard.ps1')
 }
 
 function Step-ActiveHours {
